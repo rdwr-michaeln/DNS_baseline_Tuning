@@ -1,0 +1,105 @@
+[snmp]
+agent     = 0.0.0.0
+targets   = 10.213.50.80
+port      = 162
+
+# ── SNMPv2c (default) ────────────────────────────────────────────────────────
+# Set version = v2c and provide a community string.
+version   = v2c
+community = radware
+
+# ── SNMPv3 ───────────────────────────────────────────────────────────────────
+# To use SNMPv3, change version to v3, comment out (or remove) community,
+# and fill in the v3_* fields below.
+#
+# version          = v3
+# v3_username      = trapuser
+#
+# Authentication protocol: MD5 | SHA | SHA224 | SHA256 | SHA384 | SHA512
+# v3_auth_protocol   = SHA
+# v3_auth_passphrase = authpassword
+#
+# Privacy (encryption) protocol: AES128 | AES256 | DES
+# v3_priv_protocol   = AES128
+# v3_priv_passphrase = privpassword
+
+[time_settings]
+# How often (in minutes) to poll all DefensePro devices for DNS QPS and interface status.
+# This controls how frequently dns_baseline.json is refreshed when all devices are healthy.
+pull_interval = 1
+
+[logging]
+log_level        = INFO
+# Maximum size of a single log file in KB before it is rotated
+log_max_size_kb  = 512
+# Number of rotated log files to keep (oldest are deleted when limit is reached)
+log_backup_count = 10
+
+[cyber_controller]
+username = radware
+password = radware
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Baseline tuning triggers
+# Each section controls one failover trigger.
+# Set enabled = false to completely disable that trigger at runtime.
+# Failover is only fired when ALL devices in a site match the trigger condition.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[trigger.mgmt_down]
+# Fires when a DefensePro management interface goes down (SNMP trap M_07630 / DEFENSEPRO_DOWN)
+enabled = true
+# Minutes to wait after ALL devices in a site are down before triggering failover.
+# Use this to avoid false positives from brief management blips. 0 = trigger immediately.
+down_delay_minutes = 2
+
+[trigger.interface_down]
+# Fires when a DefensePro network interface goes down (SNMP trap M_30000_Down / LINK_DOWN)
+enabled = true
+# Minutes to wait after ALL devices in a site are down before triggering failover.
+# Use this to avoid false positives from brief link/interface flaps. 0 = trigger immediately.
+down_delay_minutes = 2
+
+[trigger.traffic_decrease]
+# Fires when inbound traffic on a device drops below the configured baseline by the given %
+enabled = true
+# Minutes to wait after the entire site is detected as failed before triggering failover.
+# The drop must persist for the full delay window. 0 = trigger immediately.
+down_delay_minutes = 2
+# The drop threshold is calculated against each device's inbound_baseline_kbps value (see site sections below).
+# Formula: drop % = (inbound_baseline_kbps - current_avg_kbps) / inbound_baseline_kbps * 100
+# If drop % >= inbound_drop_threshold_percent, the device is considered failed.
+# Example: baseline = 1000 Kbps, threshold = 50 → failover triggers when traffic falls below 500 Kbps
+inbound_drop_threshold_percent = 50
+# Only trigger site failover when ALL devices in the site are reporting a traffic drop
+site_failure_on_all_dp_down = true
+
+[site.Tel-Aviv]
+devices = DefensePro-1, DefensePro-2
+
+[site.Tel-Aviv.device.DefensePro-1]
+ip                    = 10.213.50.50
+# Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
+# inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
+inbound_baseline_kbps = 1000
+
+[site.Tel-Aviv.device.DefensePro-2]
+ip                    = 10.213.50.51
+# Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
+# inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
+inbound_baseline_kbps = 1000
+
+[site.Haifa]
+devices = DefensePro-3, DefensePro-4
+
+[site.Haifa.device.DefensePro-3]
+ip                    = 10.213.50.52
+# Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
+# inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
+inbound_baseline_kbps = 1000
+
+[site.Haifa.device.DefensePro-4]
+ip                    = 10.213.50.53
+# Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
+# inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
+inbound_baseline_kbps = 1000
