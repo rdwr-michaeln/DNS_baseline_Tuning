@@ -100,9 +100,21 @@ for _section in _cfg.sections():
             _dsection = f'site.{_site_name}.device.{_dname}'
             if _dsection in _cfg:
                 _d = _cfg[_dsection]
+                _if_idx_raw = _d.get('monitored_if_indexes', '')
+                _if_idxs = {int(x.strip()) for x in _if_idx_raw.split(',') if x.strip().isdigit()}
                 _devices.append({
                     'name': _dname,
                     'ip': _d.get('ip', ''),
                     'inbound_baseline_kbps': float(_d.get('inbound_baseline_kbps', 0)),
+                    'monitored_if_indexes': _if_idxs,
                 })
         sites_config.append({'site-name': _site_name, 'devices': _devices})
+
+# Flat lookup: { device_ip: set of monitored ifIndex ints }
+# Empty set means "monitor all interfaces" (no filter applied).
+device_monitored_if_indexes = {
+    dev['ip']: dev['monitored_if_indexes']
+    for site in sites_config
+    for dev in site.get('devices', [])
+    if dev.get('ip')
+}

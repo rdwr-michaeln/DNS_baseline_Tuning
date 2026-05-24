@@ -165,7 +165,10 @@ def run(failover_manager=None):
         # failover state.  Devices that are down retain their last-known entry
         # so LINK_UP traps can still compare against the pre-failure state.
         if alive_data:
-            if_status_monitor.update_interface_devices(cc, list(alive_data.keys()))
+            if_status_monitor.update_interface_devices(
+                cc, list(alive_data.keys()),
+                monitored_indexes_map=configParser.device_monitored_if_indexes
+            )
 
         if failed_devs:
             print(f"🚨  {len(failed_devs)} DP(s) down — baseline will NOT be updated")

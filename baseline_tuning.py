@@ -109,8 +109,10 @@ class BaselineTuning:
         # saved baseline snapshot captured at startup.
         if event_name == "LINK_DOWN":
             saved_devices = if_status_monitor.load_interface_devices()
+            _monitored_idxs = configParser.device_monitored_if_indexes.get(trap_ip, set())
             confirmed, current_ifaces = if_status_monitor.check_interface_change(
-                self.ccc, trap_ip, saved_devices, "down", self.lm
+                self.ccc, trap_ip, saved_devices, "down", self.lm,
+                monitored_indexes=_monitored_idxs
             )
             if not confirmed:
                 self.lm.warning(
@@ -223,8 +225,10 @@ class BaselineTuning:
         # when the LINK_DOWN trap was processed).
         if event_name == "LINK_UP":
             saved_devices = if_status_monitor.load_interface_devices()
+            _monitored_idxs = configParser.device_monitored_if_indexes.get(trap_ip, set())
             confirmed, current_ifaces = if_status_monitor.check_interface_change(
-                self.ccc, trap_ip, saved_devices, "up", self.lm
+                self.ccc, trap_ip, saved_devices, "up", self.lm,
+                monitored_indexes=_monitored_idxs
             )
             if not confirmed:
                 self.lm.warning(

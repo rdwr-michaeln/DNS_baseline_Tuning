@@ -82,12 +82,20 @@ ip                    = 10.213.50.50
 # Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
 # inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
 inbound_baseline_kbps = 1000
+# Comma-separated list of ifIndex values to monitor for LINK_DOWN / LINK_UP traps.
+# Only these interfaces are checked when validating a trap against the live ifTable.
+# Leave empty or omit to monitor ALL interfaces on this device.
+monitored_if_indexes  = 1,2
 
 [site.Tel-Aviv.device.DefensePro-2]
 ip                    = 10.213.50.51
 # Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
 # inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
 inbound_baseline_kbps = 1000
+# Comma-separated list of ifIndex values to monitor for LINK_DOWN / LINK_UP traps.
+# Only these interfaces are checked when validating a trap against the live ifTable.
+# Leave empty or omit to monitor ALL interfaces on this device.
+monitored_if_indexes  = 1,2
 
 [site.Haifa]
 devices = DefensePro-3, DefensePro-4
@@ -97,9 +105,17 @@ ip                    = 10.213.50.52
 # Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
 # inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
 inbound_baseline_kbps = 1000
+# Comma-separated list of ifIndex values to monitor for LINK_DOWN / LINK_UP traps.
+# Only these interfaces are checked when validating a trap against the live ifTable.
+# Leave empty or omit to monitor ALL interfaces on this device.
+monitored_if_indexes  = 1,2
 
 [site.Haifa.device.DefensePro-4]
 ip                    = 10.213.50.53
 # Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
 # inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
 inbound_baseline_kbps = 1000
+# Comma-separated list of ifIndex values to monitor for LINK_DOWN / LINK_UP traps.
+# Only these interfaces are checked when validating a trap against the live ifTable.
+# Leave empty or omit to monitor ALL interfaces on this device.
+monitored_if_indexes  = 1,2

@@ -52,6 +52,9 @@ def snapshot_all_interfaces(cc, sites, logger=None):
                 continue
 
             ifaces = fetch_dp_interfaces(cc, dp_ip)
+            monitored = device.get("monitored_if_indexes") or set()
+            if monitored:
+                ifaces = [i for i in ifaces if i.get("ifIndex") in {str(x) for x in monitored}]
             devices[dp_ip] = ifaces
 
             up   = sum(1 for i in ifaces if i.get("ifOperStatus") == OPER_UP)
@@ -109,11 +112,16 @@ def load_interface_devices(baseline_file=BASELINE_FILE):
         return {}
 
 
-def update_interface_devices(cc, alive_ips, baseline_file=BASELINE_FILE, logger=None):
+def update_interface_devices(cc, alive_ips, baseline_file=BASELINE_FILE, logger=None,
+                             monitored_indexes_map=None):
     """
     Refresh the interface snapshot for *alive_ips* only.
     Devices not in *alive_ips* (e.g. currently down) retain their last-known
     snapshot entry so LINK_UP checks can still compare against it.
+
+    monitored_indexes_map : optional { ip: set(int) } from configParser.
+        When provided, only the listed ifIndex values are stored per device.
+        An empty set means all interfaces are stored (no filter).
 
     Called every poll cycle from build_dns_baseline regardless of failover state.
     Returns the merged devices dict.
@@ -123,6 +131,9 @@ def update_interface_devices(cc, alive_ips, baseline_file=BASELINE_FILE, logger=
     for dp_ip in alive_ips:
         ifaces = fetch_dp_interfaces(cc, dp_ip)
         if ifaces:
+            monitored = (monitored_indexes_map or {}).get(dp_ip) or set()
+            if monitored:
+                ifaces = [i for i in ifaces if i.get("ifIndex") in {str(x) for x in monitored}]
             saved[dp_ip] = ifaces
             updated = True
     if updated:
@@ -136,19 +147,21 @@ def update_interface_devices(cc, alive_ips, baseline_file=BASELINE_FILE, logger=
 # Validate
 # ---------------------------------------------------------------------------
 
-def check_interface_change(cc, dp_ip, saved_devices, direction, logger=None):
+def check_interface_change(cc, dp_ip, saved_devices, direction, logger=None, monitored_indexes=None):
     """
     Confirm via a live ifTable API call that at least one interface on *dp_ip*
     changed operational status in the expected *direction*.
 
     Parameters
     ----------
-    cc            : CcConnector instance
-    dp_ip         : IP of the DefensePro device to check
-    saved_devices : { dp_ip: [if_dict, ...] } as returned by load_interface_devices()
-    direction     : "down" → look for up→down transitions
-                    "up"   → look for down→up transitions
-    logger        : optional logger
+    cc                : CcConnector instance
+    dp_ip             : IP of the DefensePro device to check
+    saved_devices     : { dp_ip: [if_dict, ...] } as returned by load_interface_devices()
+    direction         : "down" → look for up→down transitions
+                        "up"   → look for down→up transitions
+    logger            : optional logger
+    monitored_indexes : optional set of ifIndex ints to restrict the check to.
+                        When None or empty, all interfaces are checked.
 
     Returns
     -------
@@ -183,6 +196,20 @@ def check_interface_change(cc, dp_ip, saved_devices, direction, logger=None):
 
     saved_by_idx   = {i.get("ifIndex"): i for i in saved_ifaces}
     current_by_idx = {i.get("ifIndex"): i for i in current_ifaces}
+
+    # Restrict to the configured monitored indexes (if any are specified)
+    if monitored_indexes:
+        current_by_idx = {k: v for k, v in current_by_idx.items() if k in monitored_indexes}
+        if not current_by_idx:
+            msg = (
+                f"[IfCheck] {dp_ip}: none of the monitored ifIndexes "
+                f"{sorted(monitored_indexes)} found in live ifTable — "
+                "skipping check (fail-open)"
+            )
+            print(msg)
+            if logger:
+                logger.warning(msg)
+            return True, current_ifaces
 
     _label = {OPER_UP: "up", OPER_DOWN: "down"}
     changed = []
