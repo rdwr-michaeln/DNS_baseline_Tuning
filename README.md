@@ -27,9 +27,10 @@ baseline_tuning.py          ← Main entry point (run this)
 | `configParser.py` | Parses `config.ini` and exposes settings as module variables |
 | `validation.py` | Validates config structure and device reachability |
 | `logManager.py` | Rotating file + console logger |
-| `snmp_collector.py` | SNMP trap receiver (pysnmp) |
+| `snmp_collector.py` | SNMP trap receiver (pysnmp); includes automatic SNMPv3 engine ID discovery for authPriv |
 | `config.ini` | **Single configuration file — edit this before running** |
 | `dns_baseline.json` | Auto-generated at runtime; stores last known QPS + interface snapshot per device |
+| `test_trap_receiver.py` | Standalone debug listener — prints every raw SNMP trap received (run separately for troubleshooting) |
 
 ---
 
@@ -46,8 +47,10 @@ baseline_tuning.py          ← Main entry point (run this)
 ```bash
 python3 -m venv myvenv
 source myvenv/bin/activate
-pip install requests pysnmp urllib3
+pip install -r requirements.txt
 ```
+
+> **Note:** `cryptography >= 43.0` is required by pysnmp for all SNMPv3 auth/privacy operations (MD5/SHA authentication and DES/AES encryption). Without it, authPriv traps are silently dropped.
 
 ---
 
@@ -76,20 +79,52 @@ cp config.ini.example config.ini
 
 Controls the SNMP trap listener.
 
+#### SNMPv2c (default)
+
 | Key | Type | Required | Description |
 |---|---|---|---|
 | `agent` | string | Yes | IP address this host listens on for incoming SNMP traps. Use `0.0.0.0` to listen on all interfaces. |
 | `targets` | string | Yes | Comma-separated list of IP addresses of SNMP managers (the devices that **send** traps to this system — typically the Cyber Controller or a dedicated SNMP manager). |
 | `port` | integer | Yes | UDP port to receive SNMP traps on. Default: `162`. Requires root privileges. |
-| `community` | string | Yes | SNMP v1/v2c community string. Must match the string configured on the DefensePro devices sending traps. |
+| `version` | string | Yes | SNMP version: `v2c` or `v3`. Default: `v2c`. |
+| `community` | string | v2c only | SNMP community string. Must match the string configured on the DefensePro. |
 
 ```ini
 [snmp]
 agent     = 0.0.0.0
 targets   = 10.213.50.80
 port      = 162
+version   = v2c
 community = radware
 ```
+
+#### SNMPv3
+
+SNMPv3 supports authentication and encryption. The system automatically discovers the sender's engine ID from each incoming trap — **no engine ID configuration is required**.
+
+| Key | Type | Description |
+|---|---|---|
+| `version` | string | Set to `v3`. |
+| `v3_username` | string | SNMPv3 username configured on the DefensePro. |
+| `v3_auth_protocol` | string | Authentication protocol: `MD5`, `SHA`, `SHA224`, `SHA256`, `SHA384`, `SHA512`. |
+| `v3_auth_passphrase` | string | Authentication passphrase. Minimum 8 characters (RFC 3414). |
+| `v3_priv_protocol` | string | Privacy (encryption) protocol: `AES128`, `AES256`, `DES`. |
+| `v3_priv_passphrase` | string | Privacy passphrase. Minimum 8 characters (RFC 3414). |
+
+```ini
+[snmp]
+agent              = 0.0.0.0
+targets            = 10.213.50.80
+port               = 162
+version            = v3
+v3_username        = radware
+v3_auth_protocol   = SHA
+v3_auth_passphrase = YourAuthPass1!
+v3_priv_protocol   = AES128
+v3_priv_passphrase = YourPrivPass1!
+```
+
+> **SNMPv3 engine ID discovery:** On the first trap from each DefensePro, the system extracts the sender's engine ID from the raw packet and registers the user credentials with correctly localized keys before pysnmp's authentication runs. This means traps from any engine are accepted without configuring engine IDs manually.
 
 > **Traps handled:**
 > - `M_07630` — DefensePro management DOWN → triggers failover
@@ -233,6 +268,7 @@ inbound_baseline_kbps = 1000
 | `devices` | string | Yes | Comma-separated list of device names defined in this site. Each name must have a matching `[site.<name>.device.<device-name>]` section. |
 | `ip` | string | Yes | Management IP of the DefensePro as registered in the Cyber Controller. |
 | `inbound_baseline_kbps` | number | Yes | Expected normal inbound traffic for this device in Kbps. Failover triggers when traffic drops below `(1 - threshold/100) × inbound_baseline_kbps`. |
+| `monitored_if_indexes` | string | No | Comma-separated list of `ifIndex` values to watch for LINK\_DOWN / LINK\_UP traps. Only these interfaces are checked against the live ifTable when validating a trap. Leave empty or omit to monitor **all** interfaces on the device. Example: `1, 2`. |
 
 > **How to determine `inbound_baseline_kbps`:**
 > Run the system for a period with no incidents and observe the traffic values in the logs:
@@ -250,7 +286,18 @@ inbound_baseline_kbps = 1000
 agent     = 0.0.0.0
 targets   = 10.213.50.80
 port      = 162
-community = radware
+
+# SNMPv2c
+# version   = v2c
+# community = radware
+
+# SNMPv3
+version            = v3
+v3_username        = radware
+v3_auth_protocol   = SHA
+v3_auth_passphrase = YourAuthPass1!
+v3_priv_protocol   = AES128
+v3_priv_passphrase = YourPrivPass1!
 
 [time_settings]
 pull_interval = 1
@@ -284,10 +331,12 @@ devices = DefensePro-1, DefensePro-2
 [site.Tel-Aviv.device.DefensePro-1]
 ip                    = 10.213.50.50
 inbound_baseline_kbps = 1000
+monitored_if_indexes  = 1, 2
 
 [site.Tel-Aviv.device.DefensePro-2]
 ip                    = 10.213.50.51
 inbound_baseline_kbps = 1000
+monitored_if_indexes  = 1, 2
 
 [site.Haifa]
 devices = DefensePro-3, DefensePro-4
@@ -295,10 +344,12 @@ devices = DefensePro-3, DefensePro-4
 [site.Haifa.device.DefensePro-3]
 ip                    = 10.213.50.52
 inbound_baseline_kbps = 1000
+monitored_if_indexes  = 1, 2
 
 [site.Haifa.device.DefensePro-4]
 ip                    = 10.213.50.53
 inbound_baseline_kbps = 1000
+monitored_if_indexes  = 1, 2
 ```
 
 ---
@@ -375,4 +426,54 @@ SNMP M_07631 (mgmt up) / M_30000_Up (link up) / Traffic recovers
 
 
 ---
+
+## Troubleshooting
+
+### No traps received
+
+1. **Check the port is bound:**
+   ```bash
+   ss -ulnp | grep 162
+   ```
+   If nothing appears, the process isn't running or lacks root. Run with `sudo`.
+
+2. **Confirm traps are arriving at the network level:**
+   ```bash
+   sudo tcpdump -nni any udp port 162
+   ```
+   If you see packets here but the script shows nothing, the issue is inside the process.
+
+3. **Use the raw trap debug listener** to confirm delivery and inspect all OID/value pairs:
+   ```bash
+   sudo myvenv/bin/python test_trap_receiver.py
+   ```
+   This prints a `[RAW]` line for every UDP packet received, before any authentication.
+
+### SNMPv3 authPriv traps silently dropped
+
+Two root causes are known; both are handled automatically by the code:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `[RAW]` lines appear but no trap output | Missing `cryptography` package — DES/AES decryption unavailable | `pip install -r requirements.txt` |
+| `[RAW]` + `[v3] New engine ID` appear but still no output | Keys localized to wrong (wildcard) engine ID → HMAC mismatch | Automatic — `_patch_for_any_engine()` in `snmp_collector.py` handles this |
+
+### `cryptography` package not found inside venv
+
+If `pip install` appears to succeed but the package is not importable from the venv Python, install it directly into the venv's site-packages:
+```bash
+pip install --target=myvenv/lib/python3.12/site-packages cryptography
+```
+
+### Verify DES/AES crypto is working
+
+```bash
+myvenv/bin/python -c "
+import pysnmp.proto.secmod.rfc3414.priv.des as d
+import pysnmp.proto.secmod.rfc3826.priv.aes as a
+print('DES ok:', not d.PysnmpCryptoError)
+print('AES ok:', not a.PysnmpCryptoError)
+"
+```
+Both should print `True`. If `False`, install the `cryptography` package (see above).
 

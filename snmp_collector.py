@@ -1,7 +1,83 @@
 from pysnmp.carrier.asyncio.dgram import udp
 from pysnmp.entity import engine, config
 from pysnmp.entity.rfc3413 import ntfrcv
+from pyasn1.codec.ber import decoder as _ber_decoder
+from pyasn1.type import univ as _asn1univ
 import json
+
+
+# ---------------------------------------------------------------------------
+# SNMPv3 dynamic engine-ID registration
+# ---------------------------------------------------------------------------
+
+def _extract_v3_engine_id(whole_msg):
+    """
+    Parse the raw SNMPv3 packet just enough to extract
+    msgAuthoritativeEngineID and msgUserName without authenticating it.
+    Returns (engine_id_bytes, username_str) or (None, None) for non-v3 / errors.
+    """
+    try:
+        msg, _ = _ber_decoder.decode(whole_msg, asn1Spec=_asn1univ.Sequence())
+        if int(msg[0]) != 3:          # not SNMPv3
+            return None, None
+        sec_raw = bytes(msg[2])       # msgSecurityParameters (BER-encoded)
+        usm, _ = _ber_decoder.decode(sec_raw, asn1Spec=_asn1univ.Sequence())
+        engine_id = bytes(usm[0])     # msgAuthoritativeEngineID
+        username  = bytes(usm[3]).decode("utf-8", errors="replace")  # msgUserName
+        return engine_id, username
+    except Exception:
+        return None, None
+
+
+def _patch_for_any_engine(snmp_engine, username, auth_proto, auth_key,
+                          priv_proto, priv_key, debug=False):
+    """
+    Monkey-patch snmpEngine.message_dispatcher.receive_message so that
+    the first trap from any previously-unseen engine is handled correctly.
+
+    Problem: pysnmp localizes auth/priv keys to the engine ID given at
+    add_v3_user() time.  Using the wildcard 0x0000000000 only works for
+    noAuthNoPriv; authPriv traps are silently dropped because the HMAC is
+    computed against the real engine ID, not the wildcard.
+
+    Fix: intercept each raw UDP packet, decode the engine ID before pysnmp's
+    USM runs, register the user (with correctly localized keys) for that engine
+    ID if we haven't seen it before, then let normal processing continue.
+
+    debug=True prints a one-liner for every raw packet received — useful for
+    confirming that UDP packets are actually reaching the process.
+    """
+    _registered = set()
+    original = snmp_engine.message_dispatcher.receive_message
+
+    def _receive(eng, transport_domain, transport_address, whole_msg):
+        engine_id, msg_user = _extract_v3_engine_id(whole_msg)
+        if debug:
+            eid_hex = engine_id.hex() if engine_id else "n/a"
+            print(f"[RAW] {len(whole_msg)} bytes  src={transport_address}"
+                  f"  engineId={eid_hex}  user={msg_user!r}", flush=True)
+        if (
+            engine_id
+            and engine_id not in _registered
+            and msg_user == username
+        ):
+            _registered.add(engine_id)
+            print(f"[v3] New engine ID {engine_id.hex()} — registering user '{username}'"
+                  " with localized keys", flush=True)
+            try:
+                config.add_v3_user(
+                    eng, username,
+                    authProtocol  = auth_proto,
+                    authKey       = auth_key,
+                    privProtocol  = priv_proto,
+                    privKey       = priv_key,
+                    securityEngineId = engine_id,
+                )
+            except Exception as e:
+                print(f"[v3] add_v3_user failed: {e}", flush=True)
+        return original(eng, transport_domain, transport_address, whole_msg)
+
+    snmp_engine.message_dispatcher.receive_message = _receive
 
 
 # Maps config-file strings to pysnmp 7.x USM constants
@@ -69,6 +145,7 @@ class SNMPTrapReceiver:
             # Pass empty string as None so pysnmp treats it as "no key"
             auth_key = v3_auth_passphrase if v3_auth_passphrase else None
             priv_key = v3_priv_passphrase if v3_priv_passphrase else None
+            # Register with wildcard for noAuthNoPriv / fallback
             config.add_v3_user(
                 self.snmp_engine,
                 v3_username,
@@ -76,7 +153,13 @@ class SNMPTrapReceiver:
                 authKey=auth_key,
                 privProtocol=priv_proto,
                 privKey=priv_key,
-                securityEngineId=bytes.fromhex("0000000000"),  # wildcard: accept traps from any engine
+                securityEngineId=bytes.fromhex("0000000000"),
+            )
+            # For authPriv: dynamically register the user for each sender's
+            # real engine ID before pysnmp's USM authentication runs.
+            _patch_for_any_engine(
+                self.snmp_engine, v3_username,
+                auth_proto, auth_key, priv_proto, priv_key,
             )
         else:
             # SNMPv1 / SNMPv2c – community-string based
