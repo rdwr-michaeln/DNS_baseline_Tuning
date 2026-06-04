@@ -194,12 +194,14 @@ def check_interface_change(cc, dp_ip, saved_devices, direction, logger=None, mon
             logger.warning(msg)
         return True, []
 
-    saved_by_idx   = {i.get("ifIndex"): i for i in saved_ifaces}
-    current_by_idx = {i.get("ifIndex"): i for i in current_ifaces}
+    saved_by_idx   = {str(i.get("ifIndex")): i for i in saved_ifaces}
+    current_by_idx = {str(i.get("ifIndex")): i for i in current_ifaces}
 
     # Restrict to the configured monitored indexes (if any are specified)
+    # Normalize to strings because ifIndex may come as int or str from the API.
     if monitored_indexes:
-        current_by_idx = {k: v for k, v in current_by_idx.items() if k in monitored_indexes}
+        _monitored_str = {str(idx) for idx in monitored_indexes}
+        current_by_idx = {k: v for k, v in current_by_idx.items() if k in _monitored_str}
         if not current_by_idx:
             msg = (
                 f"[IfCheck] {dp_ip}: none of the monitored ifIndexes "
