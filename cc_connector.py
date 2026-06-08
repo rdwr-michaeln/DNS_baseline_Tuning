@@ -1,13 +1,14 @@
 import requests
 import urllib3
+import configParser
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class CcConnector:
-    def __init__(self, username = "radware", password = "radware"):
-        self.base_url = "https://10.213.50.40"
-        self.username = username
-        self.password = password
+    def __init__(self, username=None, password=None, base_url=None):
+        self.base_url = base_url  if base_url  is not None else configParser.cc_base_url
+        self.username = username  if username  is not None else configParser.username
+        self.password = password  if password  is not None else configParser.password
         self.session = requests.Session()
         self.login()
 
@@ -86,9 +87,27 @@ class CcConnector:
             print(f"Exception in get_device_orm_map: {e}")
             return {}
 
+    def unlock_device(self, dp_ip):
+        """
+        Unlock a DefensePro device by its IP address.
+        """
+        try:
+            url = f"{self.base_url}/mgmt/system/config/tree/device/byip/{dp_ip}/unlock"
+            r = self.session.post(url, verify=False)
+            if r.status_code == 200:
+                print(f"Successfully unlocked device {dp_ip}")
+                return True
+            else:
+                print(f"Failed to unlock device {dp_ip}, status code: {r.status_code}")
+                return False
+        except Exception as e:
+            print(f"Exception in unlock_device: {e}")
+            return False
+
     def lock_device(self, dp_ip):
         """
         Lock a DefensePro device by its IP address.
+        If the device is already locked (M_00760), unlock it first then re-lock.
         """
         try:
             url = f"{self.base_url}/mgmt/system/config/tree/device/byip/{dp_ip}/lock"
@@ -96,9 +115,27 @@ class CcConnector:
             if r.status_code == 200:
                 print(f"Successfully locked device {dp_ip}")
                 return True
-            else:
-                print(f"Failed to lock device {dp_ip}, status code: {r.status_code}")
-                return False
+            # Check for M_00760: device already locked by another session
+            try:
+                body = r.json()
+            except ValueError:
+                body = {}
+            message = body.get("message", "") if isinstance(body, dict) else ""
+            if "M_00760" in message:
+                print(f"Device {dp_ip} is already locked (M_00760) — unlocking and retrying...")
+                if self.unlock_device(dp_ip):
+                    r2 = self.session.post(url, verify=False)
+                    if r2.status_code == 200:
+                        print(f"Successfully locked device {dp_ip} after unlock")
+                        return True
+                    else:
+                        print(f"Failed to lock device {dp_ip} after unlock, status code: {r2.status_code}")
+                        return False
+                else:
+                    print(f"Could not unlock device {dp_ip} — aborting lock")
+                    return False
+            print(f"Failed to lock device {dp_ip}, status code: {r.status_code}")
+            return False
         except Exception as e:
             print(f"Exception in lock_device: {e}")
             return False

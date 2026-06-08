@@ -58,8 +58,9 @@ log_filename     = 'tune_dns_baseline.log'
 full_log_path    = os.path.join(log_path, log_filename)
 
 # [cyber_controller]
-username = _cfg.get('cyber_controller', 'username', fallback='radware')
-password = _cfg.get('cyber_controller', 'password', fallback='radware')
+cc_base_url = _cfg.get('cyber_controller', 'base_url',  fallback='https://10.213.50.40')
+username    = _cfg.get('cyber_controller', 'username',  fallback='radware')
+password    = _cfg.get('cyber_controller', 'password',  fallback='radware')
 
 # [trigger.mgmt_down]
 trigger_mgmt_down             = _cfg.getboolean('trigger.mgmt_down', 'enabled',             fallback=True)

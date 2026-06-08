@@ -36,6 +36,7 @@ log_max_size_kb  = 512
 log_backup_count = 10
 
 [cyber_controller]
+base_url = https://10.213.50.40
 username = radware
 password = radware
 
