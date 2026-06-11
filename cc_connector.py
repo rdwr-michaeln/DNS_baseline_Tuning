@@ -4,6 +4,44 @@ import configParser
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+
+_DNS_PROFILE_PROPS = (
+    "rsDnsProtProfileName",
+    "rsDnsProtProfileAction",
+    "rsDnsProtProfilePacketReportStatus",
+    "rsDnsProtProfileDnsAStatus",
+    "rsDnsProtProfileDnsMxStatus",
+    "rsDnsProtProfileDnsPtrStatus",
+    "rsDnsProtProfileDnsHttpsStatus",
+    "rsDnsProtProfileDnsAaaaStatus",
+    "rsDnsProtProfileDnsTextStatus",
+    "rsDnsProtProfileDnsSoaStatus",
+    "rsDnsProtProfileDnsNaptrStatus",
+    "rsDnsProtProfileDnsSrvStatus",
+    "rsDnsProtProfileDnsOtherStatus",
+    "rsDnsProtProfileExpectedQps",
+    "rsDnsProtProfileMaxAllowQps",
+    "rsDnsProtProfileDnsAaaaQuota",
+    "rsDnsProtProfileSigRateLimTarget",
+    "rsDnsProtProfileProtectedDnsServer",
+    "rsDnsProtProfileManualTriggerStatus",
+    "rsDnsProtProfileFootprintStrictness",
+    "rsDnsProtProfileLearningSuppressionThreshold",
+    "rsDnsProtProfileComplianceCheck",
+    "rsDnsProtProfileLargeEdnsPackets",
+)
+_DNS_PROFILE_PROPS_QUERY = ",".join(_DNS_PROFILE_PROPS)
+
+
+def _session_cookie_value(session, cookie_name):
+    return next((cookie.value for cookie in session.cookies if cookie.name == cookie_name), "")
+
+
+def _jsessionid_headers(session):
+    jsessionid = _session_cookie_value(session, "JSESSIONID")
+    return {"jsessionid": jsessionid} if jsessionid else {}
+
+
 class CcConnector:
     def __init__(self, username=None, password=None, base_url=None):
         self.base_url = base_url  if base_url  is not None else configParser.cc_base_url
@@ -34,7 +72,7 @@ class CcConnector:
             r = self.session.post(url, json=payload, verify=False)
             
             if r.status_code == 200:
-                print("Login successful")
+                pass
             else:
                 print(f"Login failed with status code: {r.status_code}")
                 if r.text:
@@ -55,9 +93,7 @@ class CcConnector:
             self.login()
             # Refresh jsessionid header with the newly issued cookie
             if "headers" in kwargs and "jsessionid" in kwargs["headers"]:
-                kwargs["headers"]["jsessionid"] = next(
-                    (c.value for c in self.session.cookies if c.name == "JSESSIONID"), ""
-                )
+                kwargs["headers"]["jsessionid"] = _session_cookie_value(self.session, "JSESSIONID")
             r = self.session.request(method, url, **kwargs)
         return r
 
@@ -160,7 +196,7 @@ class CcConnector:
     def dp_dns_qps_update(self, dp_ip, po_name, expected_qps, max_allow_qps):
         """
         Update DNS QPS settings on a DefensePro device by its IP address.
-        
+
         Args:
             dp_ip (str): Device IP address
             po_name (str): Protection Object name
@@ -172,7 +208,7 @@ class CcConnector:
             payload = {
                 "rsDnsProtProfileName": po_name,
                 "rsDnsProtProfileExpectedQps": expected_qps,
-                "rsDnsProtProfileMaxAllowQps": max_allow_qps
+                "rsDnsProtProfileMaxAllowQps": max_allow_qps,
             }
             r = self.session.put(url, json=payload, verify=False)
             if r.status_code == 200:
@@ -185,6 +221,31 @@ class CcConnector:
             print(f"Exception in dp_dns_qps_update: {e}")
             return False
 
+    def dp_dns_aaaa_quota_update(self, dp_ip, po_name, dns_aaaa_quota):
+        """
+        Update only the rsDnsProtProfileDnsAaaaQuota for a single PO.
+
+        Args:
+            dp_ip (str): Device IP address
+            po_name (str): Protection Object name
+            dns_aaaa_quota (str): AAAA quota percentage (sent as string per API requirement)
+        """
+        try:
+            url = f"{self.base_url}/mgmt/device/byip/{dp_ip}/config/rsDnsProtProfileTable/{po_name}/"
+            payload = {
+                "rsDnsProtProfileName": po_name,
+                "rsDnsProtProfileDnsAaaaQuota": str(dns_aaaa_quota),
+            }
+            r = self.session.put(url, json=payload, verify=False)
+            if r.status_code == 200:
+                return True
+            else:
+                print(f"Failed to update AAAA quota on device {dp_ip}, status code: {r.status_code}")
+                return False
+        except Exception as e:
+            print(f"Exception in dp_dns_aaaa_quota_update: {e}")
+            return False
+
 
     def get_po_dns_per_dp(self, dp_ip):
         """
@@ -193,7 +254,10 @@ class CcConnector:
         Format: {'IP': [{'po_name': 'name1', 'expected_qps': value1, 'max_allow_qps': value2}, ...]}
         """
         try:
-            url = f"{self.base_url}/mgmt/device/byip/{dp_ip}/config/rsDnsProtProfileTable?count=50&props=rsDnsProtProfileName,rsDnsProtProfileAction,rsDnsProtProfilePacketReportStatus,rsDnsProtProfileDnsAStatus,rsDnsProtProfileDnsMxStatus,rsDnsProtProfileDnsPtrStatus,rsDnsProtProfileDnsHttpsStatus,rsDnsProtProfileDnsAaaaStatus,rsDnsProtProfileDnsTextStatus,rsDnsProtProfileDnsSoaStatus,rsDnsProtProfileDnsNaptrStatus,rsDnsProtProfileDnsSrvStatus,rsDnsProtProfileDnsOtherStatus,rsDnsProtProfileExpectedQps,rsDnsProtProfileMaxAllowQps,rsDnsProtProfileSigRateLimTarget,rsDnsProtProfileProtectedDnsServer,rsDnsProtProfileManualTriggerStatus,rsDnsProtProfileFootprintStrictness,rsDnsProtProfileLearningSuppressionThreshold,rsDnsProtProfileComplianceCheck,rsDnsProtProfileLargeEdnsPackets"
+            url = (
+                f"{self.base_url}/mgmt/device/byip/{dp_ip}/config/"
+                f"rsDnsProtProfileTable?count=50&props={_DNS_PROFILE_PROPS_QUERY}"
+            )
             r = self.session.get(url, verify=False)
             if r.status_code == 200:
                 dp_po_data = r.json()
@@ -212,7 +276,8 @@ class CcConnector:
                         po_info = {
                             "po_name": po_name,
                             "expected_qps": expected_qps,
-                            "max_allow_qps": max_allow_qps
+                            "max_allow_qps": max_allow_qps,
+                            "dns_aaaa_quota": po.get("rsDnsProtProfileDnsAaaaQuota"),
                         }
                         dns_info[dp_ip].append(po_info)
 
@@ -255,10 +320,7 @@ class CcConnector:
                 },
                 "sort": []
             }
-            jsessionid = next(
-                (c.value for c in self.session.cookies if c.name == "JSESSIONID"), ""
-            )
-            headers = {"jsessionid": jsessionid} if jsessionid else {}
+            headers = _jsessionid_headers(self.session)
             r = self._request("POST", url, json=payload, headers=headers, verify=False)
             if r.status_code == 200:
                 samples = r.json()
@@ -284,6 +346,69 @@ class CcConnector:
             samples = self.get_traffic_utilization(orm_id)
             result[ip] = {"orm_id": orm_id, "inbound_samples": samples}
         return result
+
+    def get_policies_per_dp(self, dp_ip):
+        """
+        Fetch IDS/policy names configured on a DefensePro device.
+
+        Args:
+            dp_ip (str): Device management IP address.
+
+        Returns:
+            list[str]: Policy names, or an empty list on error.
+        """
+        try:
+            url = f"{self.base_url}/mgmt/device/byip/{dp_ip}/config/rsIDSNewRulesTable?count=1024&props=rsIDSNewRulesName"
+            r = self.session.get(url, verify=False, timeout=10)
+            if r.status_code == 200:
+                entries = r.json().get("rsIDSNewRulesTable", [])
+                return [e["rsIDSNewRulesName"] for e in entries if e.get("rsIDSNewRulesName")]
+            else:
+                print(f"get_policies_per_dp failed for {dp_ip}: status {r.status_code}")
+                return []
+        except Exception as e:
+            print(f"Exception in get_policies_per_dp for {dp_ip}: {e}")
+            return []
+
+    def get_policy_template(self, dp_ip, policy_name):
+        """
+        Export a network template for a specific policy on a DefensePro device.
+
+        Args:
+            dp_ip (str):        Device management IP address.
+            policy_name (str):  Name of the policy to export.
+
+        Returns:
+            str | None: Raw template text, or None on error.
+        """
+        try:
+            url = f"{self.base_url}/mgmt/device/byip/{dp_ip}/config/getnetworktemplate"
+            params = {
+                "PolicyName":               policy_name,
+                "ExportConfiguration":      "on",
+                "ExportBaselineDNS":        "on",
+                "ExportBaselineBDoS":       "on",
+                "ExportBaselineHttpsFlood": "off",
+                "ExportSigUsrProf":         "off",
+                "ExportTrafficFiltersProf": "off",
+                "ExportAntiScanWhitelists": "off",
+                "saveToDb":                 "false",
+                "ExportIpExclusion":        "off",
+                "ExportUdfIpExclusion":     "off",
+                "ExportBaselineWebDoS":     "off",
+                "ExportFiltersWebDoS":      "off",
+                "ExportASNIpExclusion":     "off",
+                "ExportBaselineOOS":        "off",
+            }
+            r = self.session.get(url, params=params, verify=False, timeout=30)
+            if r.status_code == 200:
+                return r.text
+            else:
+                print(f"get_policy_template failed for {dp_ip}/{policy_name}: status {r.status_code}")
+                return None
+        except Exception as e:
+            print(f"Exception in get_policy_template for {dp_ip}/{policy_name}: {e}")
+            return None
 
     def get_if_table(self, dp_ip):
         """

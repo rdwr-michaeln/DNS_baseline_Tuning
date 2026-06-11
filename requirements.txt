@@ -9,11 +9,8 @@
 requests>=2.32.5
 urllib3>=2.5.0
 
-# SNMP trap receiver (v2c and v3 authPriv)
-pysnmp>=7.1.21
-pyasn1>=0.6.1
-
-# Cryptography backend required by pysnmp for SNMPv3 auth/privacy
-# (DES, AES-128, AES-256 encryption; MD5, SHA auth)
-# Requires >= 43.0 — earlier versions do not expose the 'decrepit' DES module
+# Cryptography backend (required by paramiko for SSH)
 cryptography>=43.0
+
+# SSH client — used for pushing config templates to DefensePro devices via CLI
+paramiko>=3.0

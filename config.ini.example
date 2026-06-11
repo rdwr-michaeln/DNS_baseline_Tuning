@@ -1,28 +1,3 @@
-[snmp]
-agent     = 0.0.0.0
-targets   = 10.213.50.80
-port      = 162
-
-# ── SNMPv2c (default) ────────────────────────────────────────────────────────
-# Set version = v2c and provide a community string.
-version   = v2c
-community = radware
-
-# ── SNMPv3 ───────────────────────────────────────────────────────────────────
-# To use SNMPv3, change version to v3, comment out (or remove) community,
-# and fill in the v3_* fields below.
-#
-# version          = v3
-# v3_username      = trapuser
-#
-# Authentication protocol: MD5 | SHA | SHA224 | SHA256 | SHA384 | SHA512
-# v3_auth_protocol   = SHA
-# v3_auth_passphrase = authpassword
-#
-# Privacy (encryption) protocol: AES128 | AES256 | DES
-# v3_priv_protocol   = AES128
-# v3_priv_passphrase = privpassword
-
 [time_settings]
 # How often (in minutes) to poll all DefensePro devices for DNS QPS and interface status.
 # This controls how frequently dns_baseline.json is refreshed when all devices are healthy.
@@ -48,14 +23,14 @@ password = radware
 # ─────────────────────────────────────────────────────────────────────────────
 
 [trigger.mgmt_down]
-# Fires when a DefensePro management interface goes down (SNMP trap M_07630 / DEFENSEPRO_DOWN)
+# Fires when a DefensePro management interface goes down (detected by interface poll monitor)
 enabled = true
 # Minutes to wait after ALL devices in a site are down before triggering failover.
 # Use this to avoid false positives from brief management blips. 0 = trigger immediately.
 down_delay_minutes = 2
 
 [trigger.interface_down]
-# Fires when a DefensePro network interface goes down (SNMP trap M_30000_Down / LINK_DOWN)
+# Fires when a DefensePro network interface goes down (detected by interface poll monitor)
 enabled = true
 # Minutes to wait after ALL devices in a site are down before triggering failover.
 # Use this to avoid false positives from brief link/interface flaps. 0 = trigger immediately.
@@ -83,20 +58,26 @@ ip                    = 10.213.50.50
 # Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
 # inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
 inbound_baseline_kbps = 1000
-# Comma-separated list of ifIndex values to monitor for LINK_DOWN / LINK_UP traps.
-# Only these interfaces are checked when validating a trap against the live ifTable.
+# Comma-separated list of ifIndex values to monitor for interface down/up detection.
+# Only these interfaces are checked by the poll monitor.
 # Leave empty or omit to monitor ALL interfaces on this device.
 monitored_if_indexes  = 1,2
+# Per-device credentials (optional). If omitted, the [cyber_controller] username/password are used.
+# username = radware
+# password = radware
 
 [site.Tel-Aviv.device.DefensePro-2]
 ip                    = 10.213.50.51
 # Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
 # inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
 inbound_baseline_kbps = 1000
-# Comma-separated list of ifIndex values to monitor for LINK_DOWN / LINK_UP traps.
-# Only these interfaces are checked when validating a trap against the live ifTable.
+# Comma-separated list of ifIndex values to monitor for interface down/up detection.
+# Only these interfaces are checked by the poll monitor.
 # Leave empty or omit to monitor ALL interfaces on this device.
 monitored_if_indexes  = 1,2
+# Per-device credentials (optional). If omitted, the [cyber_controller] username/password are used.
+# username = radware
+# password = radware
 
 [site.Haifa]
 devices = DefensePro-3, DefensePro-4
@@ -106,17 +87,23 @@ ip                    = 10.213.50.52
 # Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
 # inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
 inbound_baseline_kbps = 1000
-# Comma-separated list of ifIndex values to monitor for LINK_DOWN / LINK_UP traps.
-# Only these interfaces are checked when validating a trap against the live ifTable.
+# Comma-separated list of ifIndex values to monitor for interface down/up detection.
+# Only these interfaces are checked by the poll monitor.
 # Leave empty or omit to monitor ALL interfaces on this device.
 monitored_if_indexes  = 1,2
+# Per-device credentials (optional). If omitted, the [cyber_controller] username/password are used.
+# username = radware
+# password = radware
 
 [site.Haifa.device.DefensePro-4]
 ip                    = 10.213.50.53
 # Average expected inbound traffic in Kbps under normal conditions (used as the baseline).
 # inbound_drop_threshold_percent (in trigger.traffic_decrease) is applied against this value.
 inbound_baseline_kbps = 1000
-# Comma-separated list of ifIndex values to monitor for LINK_DOWN / LINK_UP traps.
-# Only these interfaces are checked when validating a trap against the live ifTable.
+# Comma-separated list of ifIndex values to monitor for interface down/up detection.
+# Only these interfaces are checked by the poll monitor.
 # Leave empty or omit to monitor ALL interfaces on this device.
 monitored_if_indexes  = 1,2
+# Per-device credentials (optional). If omitted, the [cyber_controller] username/password are used.
+# username = radware
+# password = radware

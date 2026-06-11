@@ -1,7 +1,25 @@
 import configparser
-import os, sys
+import os
+import sys
 
 config_file_path = 'config.ini'
+
+
+def _csv_values(raw):
+    return [value.strip() for value in raw.split(',') if value.strip()]
+
+
+def _device_section_name(site_name, device_name):
+    return f'site.{site_name}.device.{device_name}'
+
+
+def _parse_monitored_if_indexes(indexes_raw):
+    return {
+        int(index.strip())
+        for index in indexes_raw.split(',')
+        if index.strip().isdigit()
+    }
+
 
 if not os.path.exists(config_file_path):
     print(f"Error: Configuration file not found: {config_file_path}")
@@ -9,39 +27,6 @@ if not os.path.exists(config_file_path):
 
 _cfg = configparser.ConfigParser()
 _cfg.read(config_file_path)
-
-# [snmp]
-_snmp = _cfg['snmp'] if 'snmp' in _cfg else {}
-targets_raw = _snmp.get('targets', '')
-targets = [t.strip() for t in targets_raw.split(',') if t.strip()]
-if not targets:
-    print("Error: SNMP targets are missing in the configuration file.")
-    sys.exit(1)
-agent     = _snmp.get('agent', '0.0.0.0')
-port      = int(_snmp.get('port', '162'))
-community = _snmp.get('community', 'public')
-
-# SNMPv3 settings (only used when version = v3)
-snmp_version       = _snmp.get('version', 'v2c').strip().lower()
-v3_username        = _snmp.get('v3_username',        '').strip()
-v3_auth_protocol   = _snmp.get('v3_auth_protocol',   'SHA').strip()
-v3_auth_passphrase = _snmp.get('v3_auth_passphrase', '').strip()
-v3_priv_protocol   = _snmp.get('v3_priv_protocol',   'AES128').strip()
-v3_priv_passphrase = _snmp.get('v3_priv_passphrase', '').strip()
-
-if snmp_version == 'v3' and not v3_username:
-    print("Error: v3_username is required when snmp version = v3.")
-    sys.exit(1)
-
-if snmp_version == 'v3' and v3_auth_protocol.upper() != 'NONE':
-    if len(v3_auth_passphrase) < 8:
-        print(f"Error: v3_auth_passphrase must be at least 8 characters (SNMPv3 RFC 3414 requirement). Current length: {len(v3_auth_passphrase)}.")
-        sys.exit(1)
-
-if snmp_version == 'v3' and v3_priv_protocol.upper() != 'NONE':
-    if len(v3_priv_passphrase) < 8:
-        print(f"Error: v3_priv_passphrase must be at least 8 characters (SNMPv3 RFC 3414 requirement). Current length: {len(v3_priv_passphrase)}.")
-        sys.exit(1)
 
 # [time_settings]
 pull_interval = int(_cfg.get('time_settings', 'pull_interval', fallback='10'))
@@ -95,19 +80,21 @@ for _section in _cfg.sections():
     _parts = _section.split('.')
     if len(_parts) == 2 and _parts[0] == 'site':
         _site_name = _parts[1]
-        _device_names = [d.strip() for d in _cfg.get(_section, 'devices', fallback='').split(',') if d.strip()]
+        _device_names = _csv_values(_cfg.get(_section, 'devices', fallback=''))
         _devices = []
         for _dname in _device_names:
-            _dsection = f'site.{_site_name}.device.{_dname}'
+            _dsection = _device_section_name(_site_name, _dname)
             if _dsection in _cfg:
                 _d = _cfg[_dsection]
                 _if_idx_raw = _d.get('monitored_if_indexes', '')
-                _if_idxs = {int(x.strip()) for x in _if_idx_raw.split(',') if x.strip().isdigit()}
+                _if_idxs = _parse_monitored_if_indexes(_if_idx_raw)
                 _devices.append({
                     'name': _dname,
                     'ip': _d.get('ip', ''),
                     'inbound_baseline_kbps': float(_d.get('inbound_baseline_kbps', 0)),
                     'monitored_if_indexes': _if_idxs,
+                    'username': _d.get('username', username),
+                    'password': _d.get('password', password),
                 })
         sites_config.append({'site-name': _site_name, 'devices': _devices})
 
@@ -115,6 +102,15 @@ for _section in _cfg.sections():
 # Empty set means "monitor all interfaces" (no filter applied).
 device_monitored_if_indexes = {
     dev['ip']: dev['monitored_if_indexes']
+    for site in sites_config
+    for dev in site.get('devices', [])
+    if dev.get('ip')
+}
+
+# Per-device credentials lookup: { device_ip: {'username': str, 'password': str} }
+# Falls back to [cyber_controller] username/password when not set on the device.
+device_credentials = {
+    dev['ip']: {'username': dev['username'], 'password': dev['password']}
     for site in sites_config
     for dev in site.get('devices', [])
     if dev.get('ip')

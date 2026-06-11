@@ -29,10 +29,6 @@ class LogManager:
         self.logger = logging.getLogger(name)
         self.logger.setLevel(log_level_parsed)
 
-        # Create a console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(log_level_parsed)
-
         # Ensure the log directory exists
         os.makedirs(self.log_directory, exist_ok=True)
 
@@ -45,13 +41,11 @@ class LogManager:
         )
         file_handler.setLevel(log_level_parsed)
 
-        # Create a formatter and add it to the handlers
+        # Create a formatter and add it to the file handler
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        console_handler.setFormatter(formatter)
         file_handler.setFormatter(formatter)
 
-        # Add the handlers to the logger
-        self.logger.addHandler(console_handler)
+        # Add the file handler to the logger
         self.logger.addHandler(file_handler)
     
     def get_logger(self):

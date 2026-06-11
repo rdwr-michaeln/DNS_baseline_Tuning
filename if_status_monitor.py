@@ -1,12 +1,11 @@
 """
 Interface Status Monitor
 
-Fetches the ifTable from DefensePro devices via the CC REST API and saves the
-snapshot to dns_baseline.json under the "interface_snapshot" key.
+Fetches the ifTable from DefensePro devices via the CC REST API and saves
+the snapshot to dns_baseline.json under the "interface_snapshot" key.
 
-Used as a pre-validation gate before acting on SNMP LINK_DOWN / LINK_UP traps:
-the trap is only processed if the live ifTable confirms a matching change in
-interface operational status.
+The snapshot is read every 20 seconds by if_poll_monitor to detect
+interface operational-status changes.
 
 ifOperStatus values: "1" = up, "2" = down.
 """
@@ -19,6 +18,17 @@ OPER_UP   = "1"
 OPER_DOWN = "2"
 
 BASELINE_FILE = "dns_baseline.json"
+
+
+def _monitored_index_strings(monitored_indexes):
+    return {str(index) for index in monitored_indexes}
+
+
+def _filter_monitored_interfaces(ifaces, monitored_indexes):
+    if not monitored_indexes:
+        return ifaces
+    monitored = _monitored_index_strings(monitored_indexes)
+    return [iface for iface in ifaces if iface.get("ifIndex") in monitored]
 
 
 # ---------------------------------------------------------------------------
@@ -53,8 +63,7 @@ def snapshot_all_interfaces(cc, sites, logger=None):
 
             ifaces = fetch_dp_interfaces(cc, dp_ip)
             monitored = device.get("monitored_if_indexes") or set()
-            if monitored:
-                ifaces = [i for i in ifaces if i.get("ifIndex") in {str(x) for x in monitored}]
+            ifaces = _filter_monitored_interfaces(ifaces, monitored)
             devices[dp_ip] = ifaces
 
             up   = sum(1 for i in ifaces if i.get("ifOperStatus") == OPER_UP)
@@ -132,8 +141,7 @@ def update_interface_devices(cc, alive_ips, baseline_file=BASELINE_FILE, logger=
         ifaces = fetch_dp_interfaces(cc, dp_ip)
         if ifaces:
             monitored = (monitored_indexes_map or {}).get(dp_ip) or set()
-            if monitored:
-                ifaces = [i for i in ifaces if i.get("ifIndex") in {str(x) for x in monitored}]
+            ifaces = _filter_monitored_interfaces(ifaces, monitored)
             saved[dp_ip] = ifaces
             updated = True
     if updated:
@@ -200,7 +208,7 @@ def check_interface_change(cc, dp_ip, saved_devices, direction, logger=None, mon
     # Restrict to the configured monitored indexes (if any are specified)
     # Normalize to strings because ifIndex may come as int or str from the API.
     if monitored_indexes:
-        _monitored_str = {str(idx) for idx in monitored_indexes}
+        _monitored_str = _monitored_index_strings(monitored_indexes)
         current_by_idx = {k: v for k, v in current_by_idx.items() if k in _monitored_str}
         if not current_by_idx:
             msg = (

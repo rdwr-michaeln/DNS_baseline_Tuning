@@ -11,6 +11,7 @@ Polls every DP in sites.json every 10 minutes:
 import json
 import os
 import time
+import threading
 import urllib3
 from datetime import datetime
 from cc_connector import CcConnector
@@ -101,9 +102,7 @@ def build_snapshot(alive_data, sites, orm_map, failed_site_ips=None):
     for site in sites:
         site_ips = {d.get("ip") for d in site.get("devices", [])}
         if site_ips & failed_site_ips:
-            print(f"⏭️   Skipping site '{site.get('site-name')}' — site is in failover state")
             continue
-    for site in sites:
         site_entry = {"site_name": site.get("site-name", "unknown"), "devices": []}
         for device in site.get("devices", []):
             dp_name = device.get("name", "unknown")
@@ -122,6 +121,7 @@ def build_snapshot(alive_data, sites, orm_map, failed_site_ips=None):
                             "po_name": po["po_name"],
                             "rsDnsProtProfileExpectedQps": po["expected_qps"],
                             "rsDnsProtProfileMaxAllowQps": po["max_allow_qps"],
+                            "rsDnsProtProfileDnsAaaaQuota": po.get("dns_aaaa_quota"),
                         })
 
             site_entry["devices"].append(entry)
@@ -142,11 +142,13 @@ def run(failover_manager=None):
     cc    = CcConnector(configParser.username, configParser.password)
     if failover_manager is None:
         failover_manager = DpFailoverManager()
-    orm_map        = cc.get_device_orm_map()
-    already_failed = set()   # local optimisation: avoids calling redistribute on every poll tick
-    first_poll     = True    # failures seen on startup are pre-existing — do NOT redistribute
+    orm_map           = cc.get_device_orm_map()
+    already_failed    = set()   # local optimisation: avoids calling redistribute on every poll tick
+    first_poll        = True    # failures seen on startup are pre-existing — do NOT redistribute
+    delay_secs        = configParser.trigger_mgmt_down_delay  # seconds (already converted)
+    _pending_timers   = {}      # { dp_ip: threading.Timer } — waiting to confirm down before redistribute
 
-    print(f"🚀 DNS Baseline Monitor started — interval: {INTERVAL_SECONDS // 60} min")
+
 
     # -----------------------------------------------------------------------
     # Startup: snapshot interface operational status for all DPs
@@ -163,7 +165,7 @@ def run(failover_manager=None):
 
         # Always refresh interface snapshot for reachable devices regardless of
         # failover state.  Devices that are down retain their last-known entry
-        # so LINK_UP traps can still compare against the pre-failure state.
+        # so the poll monitor can still compare against the pre-failure state.
         if alive_data:
             if_status_monitor.update_interface_devices(
                 cc, list(alive_data.keys()),
@@ -182,6 +184,11 @@ def run(failover_manager=None):
             recovered_mgmt_ips = already_failed - failed_ips
             for recovered_ip in recovered_mgmt_ips:
                 failover_manager._known_failed_ips.discard(recovered_ip)
+                # Cancel any pending redistribution timer for this device
+                t = _pending_timers.pop(recovered_ip, None)
+                if t:
+                    t.cancel()
+                    print(f"⏹️   Cancelled pending redistribution timer for {recovered_ip} — device recovered")
                 # If partner sites are still fully down, apply late redistribution
                 # instead of a full restore (which would overwrite alive peers' redistributed QPS)
                 if failover_manager._redistributed_ips:
@@ -220,20 +227,66 @@ def run(failover_manager=None):
                         print(f"⚠️   {dev['name']} ({dp_ip}) down but site '{site_name}' is NOT fully down — skipping redistribution")
                         already_failed.add(dp_ip)
                     else:
-                        print(f"🆕  New failure detected: {dev['name']} ({dp_ip})")
-                        baseline = load_baseline()
-                        failover_manager.redistribute_qps_from_baseline(dp_ip, baseline, alive_data)
+                        # New failure AND site fully down — start confirmation timer.
+                        if dp_ip not in _pending_timers:
+                            if delay_secs == 0:
+                                print(f"🆕  New failure detected: {dev['name']} ({dp_ip}) — no delay, redistributing immediately")
+                                baseline = load_baseline()
+                                failover_manager.redistribute_qps_from_baseline(dp_ip, baseline, alive_data)
+                            else:
+                                delay_min = delay_secs // 60
+                                print(f"🆕  New failure detected: {dev['name']} ({dp_ip}) — waiting {delay_min} min before redistributing")
+
+                                def _fire_redistribute(ip=dp_ip, name=dev['name'], site_data=site_of_dev, site_ips_snap=site_ips):
+                                    _pending_timers.pop(ip, None)
+                                    # Re-check: device must still be down and site still fully down
+                                    if ip not in already_failed:
+                                        print(f"⏭️   {name} ({ip}) recovered before delay elapsed — skipping redistribution")
+                                        return
+                                    if ip in failover_manager._redistributed_ips:
+                                        print(f"⏭️   {name} ({ip}) — redistribution already applied")
+                                        return
+                                    print(f"⏰  Delay elapsed — {name} ({ip}) confirmed down, redistributing")
+                                    failover_manager.handle_device_failover(ip)
+
+                                t = threading.Timer(delay_secs, _fire_redistribute)
+                                t.daemon = True
+                                _pending_timers[dp_ip] = t
+                                t.start()
                         already_failed.add(dp_ip)
                 else:
                     # Device was already tracked — check if the site became fully down
                     # since the last poll (it was only partially down before).
-                    if site_fully_down and dp_ip not in failover_manager._redistributed_ips:
-                        print(f"🆕  Site now fully down — triggering redistribution for {dev['name']} ({dp_ip})")
-                        baseline = load_baseline()
-                        failover_manager.redistribute_qps_from_baseline(dp_ip, baseline, alive_data)
+                    if site_fully_down and dp_ip not in failover_manager._redistributed_ips and dp_ip not in _pending_timers:
+                        if delay_secs == 0:
+                            print(f"🆕  Site now fully down — triggering redistribution for {dev['name']} ({dp_ip})")
+                            baseline = load_baseline()
+                            failover_manager.redistribute_qps_from_baseline(dp_ip, baseline, alive_data)
+                        else:
+                            delay_min = delay_secs // 60
+                            print(f"🆕  Site now fully down — waiting {delay_min} min before redistributing {dev['name']} ({dp_ip})")
+
+                            def _fire_redistribute_late(ip=dp_ip, name=dev['name']):
+                                _pending_timers.pop(ip, None)
+                                if ip not in already_failed:
+                                    print(f"⏭️   {name} ({ip}) recovered before delay elapsed — skipping redistribution")
+                                    return
+                                if ip in failover_manager._redistributed_ips:
+                                    print(f"⏭️   {name} ({ip}) — redistribution already applied")
+                                    return
+                                print(f"⏰  Delay elapsed — {name} ({ip}) confirmed down, redistributing")
+                                failover_manager.handle_device_failover(ip)
+
+                            t = threading.Timer(delay_secs, _fire_redistribute_late)
+                            t.daemon = True
+                            _pending_timers[dp_ip] = t
+                            t.start()
                     elif not site_fully_down:
                         site_name = site_of_dev.get("site-name", "unknown") if site_of_dev else "unknown"
                         print(f"⏸️   {dev['name']} ({dp_ip}) still down — site '{site_name}' not fully down yet, waiting")
+                    elif dp_ip in _pending_timers:
+                        remaining = int(_pending_timers[dp_ip].interval - (time.time() - _pending_timers[dp_ip]._started_at) if hasattr(_pending_timers[dp_ip], '_started_at') else delay_secs)
+                        print(f"⏳  {dev['name']} ({dp_ip}) still down — redistribution pending (timer running)")
                     else:
                         print(f"⏭️   {dev['name']} ({dp_ip}) still down — redistribution already applied")
         else:
@@ -242,6 +295,11 @@ def run(failover_manager=None):
             # and must NOT be removed here.
             for ip in list(already_failed):
                 failover_manager._known_failed_ips.discard(ip)
+                # Cancel any pending redistribution timers — all devices are back
+                t = _pending_timers.pop(ip, None)
+                if t:
+                    t.cancel()
+                    print(f"⏹️   Cancelled pending redistribution timer for {ip} — all DPs recovered")
             if already_failed:
                 print("✅  All DPs recovered — restoring baseline QPS values...")
                 baseline = load_baseline()
@@ -253,13 +311,13 @@ def run(failover_manager=None):
                 alive_data, _ = query_all_dps(cc, failover_manager, sites)
 
             # Block baseline updates while any failover is still active (e.g.
-            # triggered by an SNMP trap while the DP management plane is up).
+            # triggered while the DP management plane is up).
             if failover_manager._redistributed_ips:
                 frozen = ", ".join(failover_manager._redistributed_ips)
                 print(f"⏸️   Baseline update frozen — active failover(s): {frozen}")
             else:
                 snapshot = build_snapshot(alive_data, sites, orm_map,
-                                           failed_site_ips=failover_manager._redistributed_ips)
+                                           failed_site_ips=failover_manager._known_failed_ips)
                 save_baseline(snapshot)
 
         print(f"💤  Sleeping {INTERVAL_SECONDS // 60} min...")

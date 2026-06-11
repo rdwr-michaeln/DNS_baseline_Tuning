@@ -1,11 +1,13 @@
-from snmp_collector import SNMPTrapReceiver
 import configParser
 from cc_connector import CcConnector
 from validation import ConfigValidator
 from dp_failover_manager import DpFailoverManager
 import build_dns_baseline
+import build_dp_policies
+import export_policy_templates
+import dp_config_restore
 import if_status_monitor
-import queue
+import if_poll_monitor
 import threading
 import urllib3
 import traceback
@@ -13,20 +15,12 @@ from logManager import LogManager
 import time
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-M_NAME_TO_EVENT = {
-    "M_07630": "DEFENSEPRO_DOWN",
-    "M_07631": "DEFENSEPRO_UP",
-    "M_30000_Down": "LINK_DOWN",
-    "M_30000_Up": "LINK_UP",
-}
-
 
 class BaselineTuning:
     def __init__(self):
         self.ccc = CcConnector(configParser.username, configParser.password)
         self.lm = LogManager("BaselineTuning").get_logger()
         self.thread_lock = threading.Lock()
-        self.trap_queue = queue.Queue()
 
         # Initialize configuration validator and failover manager
         self.validator = ConfigValidator()
@@ -37,6 +31,25 @@ class BaselineTuning:
         # redistribution for the remaining devices without waiting for the next
         # traffic monitor poll cycle.
         self.failover_manager.on_redistributed = self._on_device_redistributed
+        # Register SSH config-paste restore: fires after QPS values are restored
+        # to baseline. Runs in a daemon thread to avoid blocking the main loop.
+        # Push config to ALL DPs (not just the ones that recovered) so every
+        # device has a consistent baseline config after a failover cycle.
+        def _on_restored(recovered_ips):
+            all_ips = [
+                dev.get("ip")
+                for site in configParser.sites_config
+                for dev in site.get("devices", [])
+                if dev.get("ip")
+            ]
+            t = threading.Thread(
+                target=dp_config_restore.restore_site,
+                args=(all_ips, configParser.sites_config),
+                daemon=True,
+                name="DpConfigRestore",
+            )
+            t.start()
+        self.failover_manager.on_restored = _on_restored
         
         # Start the DNS baseline monitor in a background thread — pass the shared
         # failover_manager so both paths use the same _redistributed_ips guard.
@@ -49,18 +62,35 @@ class BaselineTuning:
         baseline_thread.start()
         self.lm.info("DNS Baseline Monitor started in background thread")
 
+        # Start the DP policies monitor — fetches on startup if file is missing,
+        # then refreshes once a day at midnight.  Shares the same CC session.
+        policies_thread = threading.Thread(
+            target=build_dp_policies.run,
+            args=(self.ccc,),
+            daemon=True,
+            name="DpPoliciesMonitor"
+        )
+        policies_thread.start()
+        self.lm.info("DP Policies Monitor started in background thread")
+
+        # Start the policy-template export monitor — exports/refreshes all
+        # templates in dns_baselines/ every hour. Shares the same CC session
+        # and failover state so frozen sites are skipped automatically.
+        templates_thread = threading.Thread(
+            target=export_policy_templates.run,
+            args=(self.ccc, self.failover_manager),
+            daemon=True,
+            name="PolicyTemplateExport"
+        )
+        templates_thread.start()
+        self.lm.info("Policy Template Export started in background thread")
+
         # Per-device traffic state: { ip: "healthy" | "failed" } — used by traffic monitor
         self._traffic_state = {}
-        # Per-device SNMP event state: { ip: "up" | "down" }
-        self._snmp_device_state = {}
+        # Per-device interface-poll DOWN state: { ip: "up" | "down" }
+        self._if_poll_device_state = {}
         # Per-site traffic failover state: { site_name: "healthy" | "failed" }
         self._site_traffic_state = {}
-        # Per-device SNMP DOWN confirmation timers: { ip: threading.Timer }
-        # Started when a DOWN trap arrives; marks the device as down when it fires.
-        # Cancelled if an UP trap arrives before it fires (flap suppression).
-        self._snmp_device_timers = {}
-        # Pending SNMP failover timers: { site_name: threading.Timer } (kept for UP-cancel)
-        self._snmp_pending_timers = {}
         # Pending traffic failover timers: { site_name: threading.Timer }
         self._traffic_pending_timers = {}
         # Pending DNS-baseline failover timers: { site_name: threading.Timer }
@@ -71,216 +101,89 @@ class BaselineTuning:
         traffic_thread.start()
         self.lm.info("Traffic Monitor started in background thread")
 
-        receiver = SNMPTrapReceiver(
-            configParser.agent, configParser.port, configParser.community, self.trap_queue,
-            snmp_version=configParser.snmp_version,
-            v3_username=configParser.v3_username,
-            v3_auth_protocol=configParser.v3_auth_protocol,
-            v3_auth_passphrase=configParser.v3_auth_passphrase,
-            v3_priv_protocol=configParser.v3_priv_protocol,
-            v3_priv_passphrase=configParser.v3_priv_passphrase,
+        # Start the interface-poll monitor — reads dns_baseline.json every 20 s
+        # and fires failover/recovery callbacks on interface state transitions.
+        if_poll_thread = threading.Thread(
+            target=if_poll_monitor.run,
+            args=(self._on_interface_down, self._on_interface_up),
+            kwargs={"logger": self.lm},
+            daemon=True,
+            name="IfPollMonitor",
         )
-        receiver_thread = threading.Thread(target=receiver.snmp_engine.transport_dispatcher.run_dispatcher, daemon=True)
-        receiver_thread.start()
-        self.EVENTS_TO_FUNC = {
-            "DEFENSEPRO_DOWN": self.tune_rest_dp_event,
-            "DEFENSEPRO_UP": self.tune_to_normal_event,
-            "LINK_DOWN": self.tune_rest_dp_event,
-            "LINK_UP": self.tune_to_normal_event,
-        }
+        if_poll_thread.start()
+        self.lm.info("Interface Poll Monitor started in background thread")
 
-    def tune_rest_dp_event(self, event_name, trap):
-        """
-        Handle DefensePro DOWN / Link DOWN event.
-        Failover is triggered only when ALL devices in the site are down.
-        """
-        trap_ip = trap.get("ip_address", "")
+    # ------------------------------------------------------------------
+    # Interface poll monitor callbacks
+    # ------------------------------------------------------------------
 
-        # Check whether this trigger type is enabled
-        if event_name == "DEFENSEPRO_DOWN" and not configParser.trigger_mgmt_down:
-            self.lm.info(f"mgmt_down trigger is disabled — ignoring DEFENSEPRO_DOWN for {trap_ip}")
-            return
-        if event_name == "LINK_DOWN" and not configParser.trigger_interface_down:
-            self.lm.info(f"interface_down trigger is disabled — ignoring LINK_DOWN for {trap_ip}")
+    def _on_interface_down(self, dp_ip):
+        """
+        Called by if_poll_monitor after the configured down_delay_minutes
+        have elapsed and the interface is confirmed still down.
+        Uses the same site-wide failover logic as the traffic path.
+        """
+        if not configParser.trigger_interface_down:
+            self.lm.info(f"interface_down trigger is disabled — ignoring poll DOWN for {dp_ip}")
             return
 
-        # Extra validation for LINK_DOWN: confirm via the ifTable API that at
-        # least one interface on this device actually went down compared to the
-        # saved baseline snapshot captured at startup.
-        if event_name == "LINK_DOWN":
-            saved_devices = if_status_monitor.load_interface_devices()
-            _monitored_idxs = configParser.device_monitored_if_indexes.get(trap_ip, set())
-            confirmed, current_ifaces = if_status_monitor.check_interface_change(
-                self.ccc, trap_ip, saved_devices, "down", self.lm,
-                monitored_indexes=_monitored_idxs
-            )
-            if not confirmed:
-                self.lm.warning(
-                    f"[IfCheck] LINK_DOWN for {trap_ip} not confirmed by live ifTable API "
-                    "— ignoring trap (no baseline change detected)"
-                )
-                return
-            # Update the snapshot so the next LINK_UP can compare against the
-            # post-down state, avoiding a spurious "no change" result.
-            if current_ifaces:
-                saved_devices[trap_ip] = current_ifaces
-                if_status_monitor.save_interface_devices(
-                    if_status_monitor.BASELINE_FILE, saved_devices
-                )
-                self.lm.info(f"[IfCheck] Interface snapshot updated for {trap_ip} (post-down state)")
+        self._if_poll_device_state[dp_ip] = "down"
+        self.failover_manager._known_failed_ips.add(dp_ip)
 
-        delay = (configParser.trigger_mgmt_down_delay
-                 if event_name == "DEFENSEPRO_DOWN"
-                 else configParser.trigger_interface_down_delay)
+        site = self._get_site_for_ip(dp_ip)
+        if site is None:
+            self.lm.warning(f"[IfPoll] No site found for {dp_ip} — skipping failover")
+            return
 
-        # Cancel any previous pending confirmation timer for this device (re-trap before timeout)
-        existing_device_timer = self._snmp_device_timers.pop(trap_ip, None)
-        if existing_device_timer:
-            existing_device_timer.cancel()
+        site_name = site.get("site-name", dp_ip)
+        site_ips  = [d.get("ip") for d in site.get("devices", []) if d.get("ip")]
+        all_down  = all(self._is_device_failed(ip) for ip in site_ips)
 
-        def _confirm_device_down(ip=trap_ip, ev=event_name):
-            """Fired after down_delay_minutes — marks the device as confirmed down,
-            then immediately triggers site-wide failover if all devices are now down."""
-            self.lm.warning(f"{ev} confirmed for {ip} after delay — marking device as down")
-            self._snmp_device_state[ip] = "down"
-            self._snmp_device_timers.pop(ip, None)
-
-            site = self._get_site_for_ip(ip)
-            if site is None:
-                self.lm.warning(f"No site found for {ip}, skipping failover")
-                return
-
-            site_name = site.get("site-name", ip)
-            site_ips  = [d.get("ip") for d in site.get("devices", [])]
-            all_down  = all(self._is_device_failed(s) for s in site_ips)
-
-            if not all_down:
-                down_count = sum(1 for s in site_ips if self._is_device_failed(s))
-                self.lm.warning(
-                    f"Device {ip} confirmed down, but site '{site_name}' is not fully down "
-                    f"({down_count}/{len(site_ips)} devices down) — waiting for remaining devices"
-                )
-                return
-
-            self.lm.warning(f"All devices in site '{site_name}' are down — triggering failover immediately")
-            try:
-                for sip in site_ips:
-                    validation_result = self.validator.dp_status_check(sip, "down", self.lm)
-                    if validation_result:
-                        self.lm.info(f"Device validation passed for {sip}, initiating failover...")
-                        self.failover_manager.handle_device_failover(sip)
-                        self.lm.info(f"Failover process completed for {sip}")
-                    else:
-                        self.lm.warning(f"Device validation failed for {sip}, skipping failover")
-            except Exception as e:
-                self.lm.error(f"Error during failover process for site '{site_name}': {e}")
-                self.lm.error(traceback.format_exc())
-
-        if delay == 0:
-            self.lm.warning(f"Processing {event_name} for {trap_ip} — no delay configured, marking down immediately")
-            _confirm_device_down()
-        else:
+        if not all_down:
+            down_count = sum(1 for ip in site_ips if self._is_device_failed(ip))
             self.lm.warning(
-                f"Processing {event_name} for {trap_ip} — "
-                f"will confirm as down in {delay}s (flap suppression)"
+                f"[IfPoll] {dp_ip} confirmed DOWN but site '{site_name}' not fully down "
+                f"({down_count}/{len(site_ips)}) — waiting for remaining devices"
             )
-            t = threading.Timer(delay, _confirm_device_down)
-            t.daemon = True
-            self._snmp_device_timers[trap_ip] = t
-            t.start()
+            return
 
+        self.lm.warning(f"[IfPoll] All devices in site '{site_name}' are down — triggering failover")
+        try:
+            for sip in site_ips:
+                if self.validator.dp_status_check(sip, "down", self.lm):
+                    self.failover_manager.handle_device_failover(sip)
+                else:
+                    self.lm.warning(f"[IfPoll] Validation failed for {sip} — skipping failover")
+        except Exception as e:
+            self.lm.error(f"[IfPoll] Failover error for site '{site_name}': {e}")
+            self.lm.error(traceback.format_exc())
 
-    def tune_to_normal_event(self, event_name, trap):
-        
+    def _on_interface_up(self, dp_ip):
         """
-        Handle DefensePro UP event - validate device and restore bandwidth configurations
+        Called by if_poll_monitor immediately when an interface comes back up.
+        Clears the device's failed state and restores QPS if a failover was active.
         """
-        trap_ip = trap.get("ip_address", "")
-        self.lm.info(f"✅ Processing DefensePro UP event for IP: {trap_ip}")
+        self._if_poll_device_state[dp_ip] = "up"
+        self.failover_manager._known_failed_ips.discard(dp_ip)
 
-        # Cancel any pending per-device confirmation timer (flap: came back up before delay expired)
-        device_timer = self._snmp_device_timers.pop(trap_ip, None)
-        if device_timer:
-            device_timer.cancel()
-            self.lm.info(f"Cancelled pending DOWN confirmation timer for {trap_ip} — device came back up")
-
-        self._snmp_device_state[trap_ip] = "up"
-
-        # Cancel any pending failover timers for this device's site
-        site = self._get_site_for_ip(trap_ip)
-        if site:
-            site_name = site.get("site-name", trap_ip)
-            for timers_dict, label in [
-                (self._snmp_pending_timers,         "SNMP"),
-                (self._dns_baseline_pending_timers, "DNS-baseline"),
-            ]:
-                timer = timers_dict.pop(site_name, None)
-                if timer:
-                    timer.cancel()
-                    self.lm.info(f"Cancelled pending {label} failover timer for site '{site_name}' — device {trap_ip} came back up")
-
-        # Extra validation for LINK_UP: confirm via the ifTable API that at
-        # least one interface on this device actually came back up compared to
-        # the saved baseline snapshot (which was updated to the post-down state
-        # when the LINK_DOWN trap was processed).
-        if event_name == "LINK_UP":
-            saved_devices = if_status_monitor.load_interface_devices()
-            _monitored_idxs = configParser.device_monitored_if_indexes.get(trap_ip, set())
-            confirmed, current_ifaces = if_status_monitor.check_interface_change(
-                self.ccc, trap_ip, saved_devices, "up", self.lm,
-                monitored_indexes=_monitored_idxs
-            )
-            if not confirmed:
-                self.lm.warning(
-                    f"[IfCheck] LINK_UP for {trap_ip} not confirmed by live ifTable API "
-                    "— ignoring trap (no baseline change detected)"
-                )
-                return False
-            # Update snapshot to reflect the recovered (up) state so future
-            # LINK_DOWN traps for this device compare against the correct baseline.
-            if current_ifaces:
-                saved_devices[trap_ip] = current_ifaces
-                if_status_monitor.save_interface_devices(
-                    if_status_monitor.BASELINE_FILE, saved_devices
-                )
-                self.lm.info(f"[IfCheck] Interface snapshot updated for {trap_ip} (post-recovery state)")
-
-        # Only restore if a failover was actually applied for this device.
-        # If the script started while the interface was already down, no
-        # LINK_DOWN trap was ever processed and no QPS redistribution happened —
-        # so there is nothing to restore.
         device_was_failed = (
-            trap_ip in self.failover_manager._redistributed_ips or
-            self._snmp_device_state.get(trap_ip) == "down" or
-            self._traffic_state.get(trap_ip) == "failed"
+            dp_ip in self.failover_manager._redistributed_ips or
+            self._traffic_state.get(dp_ip) == "failed"
         )
         if not device_was_failed:
             self.lm.info(
-                f"[{event_name}] {trap_ip} came up but no failover was active for this device "
-                "— skipping restore (nothing to recover)"
+                f"[IfPoll] {dp_ip} interface up — no active failover, nothing to restore"
             )
-            return True
+            return
 
         try:
-            # First validate the device is truly up
-            validation_result = self.validator.dp_status_check(trap_ip, "up", self.lm)
-            
-            if validation_result:
-                self.lm.info(f"✅ Device validation passed for {trap_ip}, initiating bandwidth restoration...")
-                
-                # Trigger bandwidth restoration
-                self.failover_manager.handle_device_recovery(trap_ip)
-                
-                self.lm.info(f"✅ Recovery process completed for {trap_ip}")
+            if self.validator.dp_status_check(dp_ip, "up", self.lm):
+                self.lm.info(f"[IfPoll] {dp_ip} validated up — restoring baseline QPS")
+                self.failover_manager.handle_device_recovery(dp_ip)
             else:
-                self.lm.warning(f"⚠️  Device validation failed for {trap_ip}, skipping recovery")
-                
-            return validation_result
-            
+                self.lm.warning(f"[IfPoll] {dp_ip} failed validation on UP — skipping restore")
         except Exception as e:
-            self.lm.error(f"❌ Error during recovery process for {trap_ip}: {e}")
-            return False
-
+            self.lm.error(f"[IfPoll] Recovery error for {dp_ip}: {e}")
 
     # ------------------------------------------------------------------
     # Traffic utilization monitor
@@ -324,14 +227,9 @@ class BaselineTuning:
             self.failover_manager.handle_device_failover(ip)
 
     def _is_device_failed(self, ip):
-        """Return True if the device is confirmed down by ANY trigger.
-        A device with a pending per-device timer is NOT yet confirmed down —
-        it is still in the flap-suppression window.
-        """
-        if ip in self._snmp_device_timers:
-            return False  # timer still running — not yet confirmed
+        """Return True if the device is confirmed down by ANY trigger."""
         return (
-            self._snmp_device_state.get(ip) == "down" or
+            self._if_poll_device_state.get(ip) == "down" or
             self._traffic_state.get(ip) == "failed" or
             ip in self.failover_manager._redistributed_ips
         )
@@ -491,29 +389,11 @@ class BaselineTuning:
                 self.lm.error(f"[TrafficMonitor] Exception in poll cycle: {e}")
                 self.lm.error(traceback.format_exc())
 
-    def parseEvent(self, trap):
-        # The m_num field contains the actual message number (e.g., "M_07630")
-        m_num = trap.get("m_num", "")
-        self.lm.info(f"Received trap with m_num: {m_num}")
-        
-        if m_num in M_NAME_TO_EVENT:
-            event_name = M_NAME_TO_EVENT[m_num]
-            self.lm.info(f"{event_name} trap received {trap}")
-            self.EVENTS_TO_FUNC[event_name](event_name, trap)
-        else:
-            self.lm.warning(f"Unknown trap message number: {m_num}")
-
     def run(self):
+        """Keep the main thread alive while all monitors run as daemon threads."""
+        self.lm.info("BaselineTuning running — all monitors active")
         while True:
-            try:
-                time.sleep(3)
-                trap = self.trap_queue.get()
-                print(trap)
-                self.lm.debug(f"DEBUG: Received trap from queue: {trap}")
-                self.parseEvent(trap)
-            except Exception as e:
-                self.lm.error(f"general exception: {e}")
-                self.lm.error(f"{traceback.format_exc()}")
+            time.sleep(60)
 
 if __name__ == "__main__":
     bt = BaselineTuning()

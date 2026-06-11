@@ -110,6 +110,7 @@ ENV/
 env.bak/
 venv.bak/
 myvenv/
+dns_baselines/
 
 # Spyder project settings
 .spyderproject
@@ -148,6 +149,7 @@ Thumbs.db
 # Project specific
 *.log
 config.ini
+dp_policies.json
 dns_baseline.json
 secrets.json
 .env.local
