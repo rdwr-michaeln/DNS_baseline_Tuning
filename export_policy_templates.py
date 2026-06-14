@@ -161,7 +161,7 @@ def export_all(cc, policies_data, frozen_ips=None):
 # Background run loop
 # ---------------------------------------------------------------------------
 
-EXPORT_INTERVAL_SECONDS  = 60  # 1 minute
+EXPORT_INTERVAL_SECONDS  = 3600  # 1 hour
 RECOVERY_COOLDOWN_SECONDS = 3600  # wait 1 h after full recovery before resuming
 
 
@@ -175,14 +175,14 @@ def _site_name_for_ip(ip, sites):
 def run(cc=None, failover_manager=None):
     """
     Long-running function for a background thread.
-    Exports/refreshes all policy templates every minute.
+    Exports/refreshes all policy templates every hour.
 
     Freeze / cooldown rules:
       - A site is FROZEN while ALL its devices are unreachable OR any device
         is in active failover (_redistributed_ips).
       - After the site fully recovers, a 1-hour cooldown begins.  The files
         are NOT updated during the cooldown window.
-      - Normal minute-based exports resume once the cooldown has elapsed.
+      - Normal hour-based exports resume once the cooldown has elapsed.
 
     Args:
         cc (CcConnector | None):             Reuse an existing CC session if provided.

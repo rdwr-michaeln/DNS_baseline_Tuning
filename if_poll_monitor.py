@@ -27,7 +27,7 @@ from datetime import datetime
 import configParser
 import if_status_monitor
 
-POLL_INTERVAL   = 20          # seconds between reads of dns_baseline.json
+POLL_INTERVAL   = 5          # seconds between reads of dns_baseline.json
 BASELINE_FILE   = "dns_baseline.json"
 OPER_UP         = "1"
 OPER_DOWN       = "2"
