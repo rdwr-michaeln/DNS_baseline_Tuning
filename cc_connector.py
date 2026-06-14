@@ -48,6 +48,7 @@ class CcConnector:
         self.username = username  if username  is not None else configParser.username
         self.password = password  if password  is not None else configParser.password
         self.session = requests.Session()
+        self.session.trust_env = False
         self.login()
 
     def active_cc_check(self):
