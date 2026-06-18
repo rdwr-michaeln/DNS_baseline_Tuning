@@ -198,6 +198,11 @@ def run(cc=None, failover_manager=None):
     # Sites that were frozen on the previous cycle
     _previously_frozen_sites = set()
 
+    # Wait 10 seconds before the first export so other startup components
+    # (dp_policies.json build, CC login, etc.) have time to initialise.
+    print("[TemplateExport] First export in 10 seconds...")
+    time.sleep(10)
+
     while True:
         if not os.path.exists(POLICIES_FILE):
             time.sleep(60)

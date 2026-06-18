@@ -19,9 +19,8 @@ Output format:
 """
 
 import json
-import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import urllib3
 
@@ -66,11 +65,7 @@ def save_policies(devices_data):
         json.dump(output, f, indent=2)
 
 
-def _seconds_until_midnight():
-    """Return seconds remaining until the next midnight."""
-    now  = datetime.now()
-    next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return (next_midnight - now).total_seconds()
+REFRESH_INTERVAL_SECONDS = 3600  # refresh every hour
 
 
 def run(cc=None):
@@ -78,8 +73,8 @@ def run(cc=None):
     Long-running function intended to be called from a background thread.
 
     Behaviour:
-    - If dp_policies.json does not exist, fetches immediately on startup.
-    - Refreshes the file every day at midnight.
+    - Fetches immediately on every startup.
+    - Refreshes the file every hour.
     - Accepts an optional CcConnector instance (so the caller can share the
       existing session instead of creating a second login).
     """
@@ -91,18 +86,12 @@ def run(cc=None):
     if cc is None:
         cc = CcConnector()
 
-    # Fetch immediately if the file is missing
-    if not os.path.exists(POLICIES_FILE):
-        devices_data = build_policies(cc, sites)
-        save_policies(devices_data)
-
     while True:
-        wait = _seconds_until_midnight()
-        time.sleep(wait)
-
-        print("[PoliciesMonitor] Midnight refresh — updating dp_policies.json...")
+        print("[PoliciesMonitor] Updating dp_policies.json...")
         devices_data = build_policies(cc, sites)
         save_policies(devices_data)
+
+        time.sleep(REFRESH_INTERVAL_SECONDS)
 
 
 def main():
